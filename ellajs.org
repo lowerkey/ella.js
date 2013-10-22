@@ -1,0 +1,936 @@
+* INPROGRESS ella.js
+  SCHEDULED: <2013-10-24 Thu>
+Aims to provide a call graph of javascript functions by the end of next week. 
+
+** INPROGRESS Todos
+- Get pegjs to build the supplied example javascript grammar.
+- Read pegjs output, comparing it to DebugVisitor of last project.
+- Integrate ubigraph.js
+- Build graphs
+  - definitions
+  - calls
+
+** DONE Getting The JavaScript Grammar
+   CLOSED: [2013-10-20 Sun 00:24]
+#+BEGIN_SRC javascript
+  #!/usr/bin/env node
+
+  // ella.js
+  // Joshua Moore
+  // 2013-10-19
+  
+  // Utility Functions
+  
+  // path 2 string
+  var p2s = function(path){
+      var buf = fs.readFileSync(path);
+      return buf.toString('utf-8');
+  }
+  
+  // Build the parser
+  var fs = require('fs');
+  var PEG = require('pegjs');
+  var javascript_grammar_path = '../node_modules/pegjs/examples/javascript.pegjs';
+  var javascript_grammar_buffer = fs.readFileSync(javascript_grammar_path);
+  var javascript_grammar_string = javascript_grammar_buffer.toString('utf-8')
+  var javascript_parser = PEG.buildParser(javascript_grammar_string);
+  
+  // Parse the file described in arguments
+  process.argv.slice(2).forEach(function(val, index, array){
+      console.dir(javascript_parser.parse(p2s(val)));
+  });
+
+#+END_SRC
+
+*** Thanks
+- http://nodejs.org/api/fs.html
+- https://github.com/dmajda/pegjs
+
+** INPROGRESS Interpreting The Javascript Grammar
+*** Visitors
+Now I get to implement my own Visitor, in javascript, yay!
+http://stackoverflow.com/questions/9831415/how-to-implement-visitor-pattern-in-javascript/14462086#14462086
+Or not. 
+
+Seeing how the tree is already labeled in JSON for me, all I really have to 
+do is walk the tree. 
+
+#+BEGIN_SRC javascript
+  
+  module.exports = {
+      PegWalker: function(type_callbacks, init){
+          this.type_callbacks = type_callbacks || {};
+          if(typeof(init) == 'function'){
+              init.call(this);
+          }
+  
+          var that = this;
+          this.walk = function(tree, context){
+              var callback = that.type_callbacks[tree.type];
+              if(callback){
+                  var local_context = {
+                      parent: context
+                  };
+                  callback.call(that, tree, local_context);
+              }else{
+                  console.log('PegWalker:', 'Encountered unhandled node type:', tree.type);
+                  console.dir(tree);
+              }
+          };
+      }
+  };
+  
+#+END_SRC
+
+This should provide a skeleton implementation. Please note that to use it,you 
+will have to inspect the parser nodes, supply functions that can react to 
+each of the `element` types to the PegWalker, calling walk again on each of
+the child nodes.
+ 
+*** INPROGRESS Reacting to the parser
+#+BEGIN_SRC javascript
+  // ella.js
+  // Joshua Moore
+  // 2013-10-19
+  
+  /* Imports */
+  var fs = require('fs');
+  var PegWalker = require('./WalkPEG.js').PegWalker;
+  
+  /* Utility Functions */
+  
+  // path 2 string
+  var p2s = function(path){
+      var buf = fs.readFileSync(path);
+      return buf.toString('utf-8');
+  }
+  
+  /* Building the Parser */
+  console.log('loading parser...');
+  var js_grammar_path = '../node_modules/pegjs/examples/javascript.pegjs';
+  var js_grammar_buffer = fs.readFileSync(js_grammar_path);
+  var js_grammar_string = js_grammar_buffer.toString('utf-8')
+  var js_parser = require('./js_parser.js'); 
+  
+  /* Parse the file described in arguments */
+  console.log('loading ubigraph...');
+  var u = require('../node-ubigraph/ubigraph.js');
+  var ubigraph = new u.Ubigraph();
+  ubigraph.clear();
+  var noop = function(){};
+  var error = function(err){
+      console.log(err);
+  };
+  var label_vertex = function(id, label){
+      ubigraph.setVertexAttribute(id, 'label', label, noop);
+  };
+  
+  var edgeFromParent = function(context){
+      var child = context;
+      var parent = child.parent;
+      while(!(parent.hasOwnProperty('vid')) && parent.hasOwnProperty('parent')){
+          parent = parent.parent;
+      }
+      ubigraph.newEdge(parent.vid, child.vid, function(err, id){
+          ubigraph.setEdgeAttribute(id, 'oriented', 'true');
+      });
+  };
+  
+  console.log('setting up walker');
+  var walker = new PegWalker({
+      'Program': function(node, context){
+          var that = this;
+          ubigraph.newVertex(function(err, id){
+              if(!err){
+                  if(typeof(id) != 'number'){
+                      console.log("Something's fishy in Program");
+                  }
+                  
+                  label_vertex(id, 'Program');
+  
+                  context.vid = id;
+                  for(var i=0; i<node['elements'].length; i++){
+                      that.walk(node.elements[i], context);
+                  }
+              }
+          });
+      },
+      'VariableStatement': function(node, context){
+          var visitor = this;
+          var that = this;
+          ubigraph.newVertex(function(err, vid){
+              if(!err){  
+                  var local_context = {
+                      parent: context,
+                      vid: vid
+                  };
+                  edgeFromParent(local_context);
+                  for(var i=0; i<node.declarations.length; i++){
+                      visitor.walk(node.declarations[i], local_context);
+                  }
+              }
+          });
+      },
+      'AssignmentExpression': function(node){
+          // console.log(node.type, node.left, '=', node.right);
+
+'      },
+      'FunctionCall': function(node, context){
+          ubigraph.newVertex(function(err, vid){
+              label_vertex(vid, '()');
+              local_context = {
+                  parent: context,
+                  vid: vid
+              }
+              edgeFromParent(local_context);
+          });
+      },
+      'VariableDeclaration': function(node, context){
+          this.walk(node.value, context);
+      },
+      'NewOperator': function(node, context){
+          this.walk(node.constructor, context);
+          for(var i=0; i<node.arguments.length; i++){
+              this.walk(node.arguments[i], context);
+          }
+      },
+      'Function': function(node, context){
+          var visitor = this;
+          ubigraph.newVertex(function(err, id){
+              label_vertex(id, 'f: ' + (node.name ? node.name : ''));
+              var local_context = {
+                  parent: context,
+                  vid: id
+              };
+              edgeFromParent(local_context);
+              
+              for(var i=0; i<node.elements.length; i++){
+                  visitor.walk(node.elements[i], local_context);
+              }
+          });
+      },
+      'PropertyAccess': function(node, context){
+          
+      }
+  }, function(){
+      this.vertices = [];
+  });
+  
+  process.argv.slice(2).forEach(function(val, index, array){
+      console.log('parsing', val);
+      var ast = js_parser.parse(p2s(val));
+      
+      console.dir(ast);
+      
+      console.log('traversing', val);
+      walker.walk(ast, {});
+  });
+  
+  
+#+END_SRC
+
+Building the parser with every run of ella.js was expensive, and running the
+parser took too long. So I let ella include a parser generated by
+`pegjs --cache .../javascript.pegjs js_parser.js`. 
+
+The caching options (for pathological cases) really sped up the compilation 
+process. 
+
+** Todos
+*** DONE Investigate the ECMAScript 262 Grammar.
+    CLOSED: [2013-10-21 Mon 00:53]
+    Investigated the pegjs/examples/javascript.pegjs grammar, searching it for
+    the term `type`.
+*** DONE Implement NodeTypes as in full.
+    CLOSED: [2013-10-21 Mon 00:54]
+*** DONE Factor out the Concrete Visitor
+    CLOSED: [2013-10-21 Mon 00:54]
+
+** Restart!
+#+BEGIN_SRC javascript :tangle WalkPEG.js
+  
+  module.exports = {
+      PegWalker: function(type_callbacks, init, generic_visit){
+          var that = this;
+          
+          this.visit_helper = function(node, context){
+              if(node === undefined){
+                  return;
+              }
+              if(!node.hasOwnProperty('type')){
+                  return;
+              }
+  
+              var callback = that.type_callbacks[node.type];
+              if(callback){
+                  callback.call(that, node, context);
+              }else{
+                  if(that.hasOwnProperty('generic_visit')){
+                      that.generic_visit.call(that, node, context);
+                  }
+              };
+          };
+  
+          this.visit = function(node_s, context){
+              var local_context = {
+                  parent: context
+              };
+              if(Array.isArray(node_s)){
+                  for(var i=0; i<node_s.length; i++){
+                      this.visit_helper(node_s[i], local_context);
+                  }
+              }else{
+                  this.visit_helper(node_s, local_context);
+              }
+          };
+  
+          this.type_callbacks = type_callbacks || {};
+          if(typeof(init) == 'function'){
+              init.call(this);
+          }
+          
+          if(typeof(generic_visit) == 'function'){
+              this.generic_visit = generic_visit;
+          }
+      }
+  };
+  
+#+END_SRC
+
+#+BEGIN_SRC javascript :tangle ParseTreeVisitor.js
+    
+  var Skeleton = require('./WalkPEG.js').PegWalker;
+  
+  var init = function(){
+      var u = require('../node-ubigraph/ubigraph.js');
+      this.ubigraph = new u.Ubigraph();
+      this.ubigraph.clear();
+      this.noop = function(){};
+      this.label_vertex = function(id, label){
+          this.ubigraph.setVertexAttribute(id, 'label', label, this.noop);
+      };
+      var that = this;
+      this.edgeFromParent = function(context){
+          var child = context;
+          var parent = child.parent;
+          while(!(parent.hasOwnProperty('vid')) 
+                && parent.hasOwnProperty('parent')){
+              parent = parent.parent;
+          }
+          this.ubigraph.newEdge(parent.vid, child.vid, function(err, id){
+              that.ubigraph.setEdgeAttribute(id, 'oriented', 'true');
+          });
+      };
+  
+      this.visit = function(node_s, context){
+          var local_context = {
+              parent: context
+          };
+  
+          this.ubigraph.newVertex(function(err, id){
+              local_context.vid = id;
+              that.edgeFromParent(local_context);
+  
+              if(Array.isArray(node_s)){
+                  for(var i=0; i<node_s.length; i++){
+                      that.visit_helper(node_s[i], local_context);
+                  }
+              }else{
+                  that.visit_helper(node_s, local_context);
+              }
+              
+          });
+      };
+      
+  };
+  
+  var generic_visit = function(node, context){
+      switch(node.type){
+      case 'Program':
+          this.visit(node.elements, context);
+  
+      case 'FunctionCall':
+          this.visit(node.arguments, context);
+          break;
+  
+      case 'VariableStatement':
+          this.visit(node.declarations, context);
+          break;
+  
+      case 'VariableDeclaration':
+          this.visit(node.value, context);
+          break;
+  
+      case 'StringLiteral':
+          break;
+  
+      case 'PropertyAccess':
+          this.visit(node.base, context);
+          break;
+  
+      case 'Function':
+          this.visit(node.elements, context);
+          break;
+  
+      case 'ReturnStatement':
+          this.visit(node.value, context);
+          break;
+  
+      case 'Variable':
+          break;
+  
+      case 'NewOperator':
+          this.visit(node.constructor, context);
+          break;
+  
+      case 'WhileStatement':
+          this.visit(node.condition, context);
+          this.visit(node.statement, context);
+          break;
+  
+      case 'BinaryExpression':
+          this.visit(node.left, context);
+          this.visit(node.nright, context);
+          break;
+  
+      case 'UnaryExpression':
+          this.visit(node.expression, context);
+          break;
+  
+      case 'FunctionCall':
+          this.visit(node.name, context);
+          break;
+  
+      case 'ObjectLiteral':
+          break;
+          
+      case 'RegularExpressionLiteral':
+          break;
+  
+      case 'This':
+          break;
+  
+      case 'ArrayLiteral':
+          break;
+          
+      case 'GetterDefinition':
+          this.visit(node.body, context);
+          break;
+  
+      case 'SetterDefinition':
+          this.visit(node.param, context);
+          this.visit(node.body, context);
+          break;
+  
+      case 'PropertyAssignment':
+          this.visit(node.value, context);
+          this.visit(node.value, context);
+          break;
+  
+      case 'FunctionCallArguments':
+          this.visit(node.args, context);
+          break;
+  
+      case 'PropertyAccessProperty':
+          break;
+  
+      case 'PostfixExpression':
+          this.visit(node.expression, context);
+          break;
+  
+      case 'ConditionalExpression':
+          this.visit(node.condition, context);
+          this.visit(node.trueExpression, context);
+          this.visit(node.falseExpression, context);
+          break;
+  
+      case 'Block':
+          this.visit(node.statements, context);
+          break;
+  
+      case 'EmptyStatement':
+          break;
+  
+      case 'IfStatement':
+          this.visit(node.condition, context);
+          this.visit(node.ifStatement, context);
+          this.visit(node.elseStatement, context);
+          break;
+  
+      case 'ForStatement':
+          this.visit(node.declarations, context);
+          break;
+  
+      case 'ForInStatement':
+          this.visit(node.iterator, context);
+          this.visit(node.collection, context);
+          this.visit(node.statement, context);
+          break;
+  
+      case 'ContinueStatement':
+          break;
+  
+      case 'BreakStatement':
+          this.visit(node.value, context);
+          break;
+  
+      case 'WithStatement':
+          this.visit(node.expression, context);
+          this.visit(node.clauses, context);
+          break;
+  
+      case 'CaseBlock':
+          this.visit(node.selector, context);
+          this.visit(node.statements, context);
+          break;
+  
+      case 'DefaultClause':
+          this.visit(node.statements, context);
+          break;
+  
+      case 'LabelledStatement':
+          this.visit(node.statement, context);
+          break;
+  
+      case 'ThrowStatement':
+          this.visit(node.exception, context);
+          break;
+  
+      case 'TryStatement':
+          this.visit(node.block, context);
+          break;
+  
+      case 'Catch':
+          this.visit(node.identifier, context);
+          this.visit(node.block, context);
+          break;
+  
+      case 'Finally':
+          this.visit(node.block, context);
+          break;
+  
+      case 'DebuggerStatement':
+          break;
+  
+      case 'AssignmentExpression':
+          this.visit(node.left, context);
+          this.visit(node.right, context);
+          break;
+          
+      case 'SwitchStatement':
+          this.visit(node.expression, context);
+          this.visit(node.clauses, context);
+          break;
+  
+      case 'CaseClause':
+          this.visit(this.selector, context);
+          this.visit(this.statements, context);
+          break;
+  
+      default:
+          if(node.hasOwnProperty('elements')){
+              console.log('Unknown node type, but with elements:', node.type);
+              console.dir(node);
+              this.visit(node.elements, context);
+          }else{
+              console.log('Unknown Node Type: ', node.type);
+              console.dir(node);
+          }
+          break;
+      }
+  };
+  
+  var visit_methods = {
+
+  };
+  
+  module.exports = {
+      getVisitor: function(ubigraph){
+          return new Skeleton(visit_methods, init, generic_visit);
+      }
+  };
+#+END_SRC
+
+#+BEGIN_SRC javascript :tangle ella.js
+  // ella.js
+  // Joshua Moore
+  // 2013-10-19
+  
+  /* Imports */
+  var fs = require('fs');
+  var PegWalker = require('./WalkPEG.js').PegWalker;
+  
+  /* Utility Functions */
+  
+  // path 2 string
+  var p2s = function(path){
+      var buf = fs.readFileSync(path);
+      return buf.toString('utf-8');
+  }
+  
+  /* Building the Parser */
+  console.log('loading parser...');
+  var js_grammar_path = '../node_modules/pegjs/examples/javascript.pegjs';
+  var js_grammar_buffer = fs.readFileSync(js_grammar_path);
+  var js_grammar_string = js_grammar_buffer.toString('utf-8')
+  var js_parser = require('./js_parser.js'); 
+  
+  /* Parse the file described in arguments */
+  console.log('loading ubigraph...');
+  var u = require('../node-ubigraph/ubigraph.js');
+  var ubigraph = new u.Ubigraph();
+  ubigraph.clear();
+  var noop = function(){};
+  var error = function(err){
+      console.log(err);
+  };
+  var label_vertex = function(id, label){
+      ubigraph.setVertexAttribute(id, 'label', label, noop);
+  };
+  
+  var edgeFromParent = function(context){
+      var child = context;
+      var parent = child.parent;
+      while(!(parent.hasOwnProperty('vid')) && parent.hasOwnProperty('parent')){
+          parent = parent.parent;
+      }
+      ubigraph.newEdge(parent.vid, child.vid, function(err, id){
+          ubigraph.setEdgeAttribute(id, 'oriented', 'true');
+      });
+  };
+  
+  console.log('setting up walker');
+  var getVisitor = require(process.argv[2]).getVisitor;
+  
+  process.argv.slice(3).forEach(function(val, index, array){
+      console.log('parsing', val);
+      var parse_tree = js_parser.parse(p2s(val));
+      
+      console.log('traversing', val);
+      var visitor = getVisitor();
+  
+      visitor.ubigraph.newVertex(function(err, id){
+          visitor.ubigraph.clear(function(){
+              visitor.ubigraph.setVertexAttribute(id, 'color', '#00FF00', function(err){
+                  visitor.visit(parse_tree, {vid: id});
+              });
+          });
+      });
+  
+  });
+  
+  
+#+END_SRC
+
+** Call Graph Time!
+
+#+BEGIN_SRC javascript :tangle CallGraphVisitor.js
+    
+  var Skeleton = require('./WalkPEG.js').PegWalker;
+  
+  var init = function(){
+      var u = require('../node-ubigraph/ubigraph.js');
+      this.ubigraph = new u.Ubigraph();
+      this.ubigraph.clear();
+      this.noop = function(){};
+      this.label_vertex = function(id, label){
+          this.ubigraph.setVertexAttribute(id, 'label', label, this.noop);
+      };
+      var that = this;
+      this.edgeFromParent = function(context){
+          var child = context;
+          var parent = child.parent;
+          while(!(parent.hasOwnProperty('vid')) 
+                && parent.hasOwnProperty('parent')){
+              parent = parent.parent;
+          }
+          this.ubigraph.newEdge(parent.vid, child.vid, function(err, id){
+              that.ubigraph.setEdgeAttribute(id, 'oriented', 'true');
+          });
+      };
+  
+      this.visit = function(node_s, ctx){
+          if(Array.isArray(node_s)){
+              for(var i=0; i<node_s.length; i++){
+                  var local_ctx = {
+                      parent: ctx,
+                      node: node_s[i]
+                  }
+                  that.visit_helper(node_s[i], local_ctx);
+              }
+          }else{
+              var local_ctx = {
+                  parent: ctx,
+                  node: node_s
+              }
+              that.visit_helper(node_s, local_ctx);
+          }
+      }; 
+  
+  };
+  
+  var generic_visit = function(node, context){
+      switch(node.type){
+      case 'Program':
+          this.visit(node.elements, context);
+  
+      case 'FunctionCall':
+          this.visit(node.arguments, context);
+          break;
+  
+      case 'VariableStatement':
+          this.visit(node.declarations, context);
+          break;
+  
+      case 'VariableDeclaration':
+          this.visit(node.value, context);
+          break;
+  
+      case 'StringLiteral':
+          break;
+  
+      case 'PropertyAccess':
+          this.visit(node.base, context);
+          break;
+  
+      case 'Function':
+          this.visit(node.elements, context);
+          break;
+  
+      case 'ReturnStatement':
+          this.visit(node.value, context);
+          break;
+  
+      case 'Variable':
+          break;
+  
+      case 'NewOperator':
+          this.visit(node.constructor, context);
+          break;
+  
+      case 'WhileStatement':
+          this.visit(node.condition, context);
+          this.visit(node.statement, context);
+          break;
+  
+      case 'BinaryExpression':
+          this.visit(node.left, context);
+          this.visit(node.nright, context);
+          break;
+  
+      case 'UnaryExpression':
+          this.visit(node.expression, context);
+          break;
+  
+      case 'FunctionCall':
+          this.visit(node.name, context);
+          break;
+  
+      case 'ObjectLiteral':
+          break;
+          
+      case 'RegularExpressionLiteral':
+          break;
+  
+      case 'This':
+          break;
+  
+      case 'ArrayLiteral':
+          break;
+          
+      case 'GetterDefinition':
+          this.visit(node.body, context);
+          break;
+  
+      case 'SetterDefinition':
+          this.visit(node.param, context);
+          this.visit(node.body, context);
+          break;
+  
+      case 'PropertyAssignment':
+          this.visit(node.value, context);
+          this.visit(node.value, context);
+          break;
+  
+      case 'FunctionCallArguments':
+          this.visit(node.args, context);
+          break;
+  
+      case 'PropertyAccessProperty':
+          break;
+  
+      case 'PostfixExpression':
+          this.visit(node.expression, context);
+          break;
+  
+      case 'ConditionalExpression':
+          this.visit(node.condition, context);
+          this.visit(node.trueExpression, context);
+          this.visit(node.falseExpression, context);
+          break;
+  
+      case 'Block':
+          this.visit(node.statements, context);
+          break;
+  
+      case 'EmptyStatement':
+          break;
+  
+      case 'IfStatement':
+          this.visit(node.condition, context);
+          this.visit(node.ifStatement, context);
+          this.visit(node.elseStatement, context);
+          break;
+  
+      case 'ForStatement':
+          this.visit(node.declarations, context);
+          break;
+  
+      case 'ForInStatement':
+          this.visit(node.iterator, context);
+          this.visit(node.collection, context);
+          this.visit(node.statement, context);
+          break;
+  
+      case 'ContinueStatement':
+          break;
+  
+      case 'BreakStatement':
+          this.visit(node.value, context);
+          break;
+  
+      case 'WithStatement':
+          this.visit(node.expression, context);
+          this.visit(node.clauses, context);
+          break;
+  
+      case 'CaseBlock':
+          this.visit(node.selector, context);
+          this.visit(node.statements, context);
+          break;
+  
+      case 'DefaultClause':
+          this.visit(node.statements, context);
+          break;
+  
+      case 'LabelledStatement':
+          this.visit(node.statement, context);
+          break;
+  
+      case 'ThrowStatement':
+          this.visit(node.exception, context);
+          break;
+  
+      case 'TryStatement':
+          this.visit(node.block, context);
+          break;
+  
+      case 'Catch':
+          this.visit(node.identifier, context);
+          this.visit(node.block, context);
+          break;
+  
+      case 'Finally':
+          this.visit(node.block, context);
+          break;
+  
+      case 'DebuggerStatement':
+          break;
+  
+      case 'AssignmentExpression':
+          this.visit(node.left, context);
+          this.visit(node.right, context);
+          break;
+          
+      case 'SwitchStatement':
+          this.visit(node.expression, context);
+          this.visit(node.clauses, context);
+          break;
+  
+      case 'CaseClause':
+          this.visit(this.selector, context);
+          this.visit(this.statements, context);
+          break;
+  
+      default:
+          if(node.hasOwnProperty('elements')){
+              console.log('Unknown node type, but with elements:', node.type);
+              // console.dir(node);
+              this.visit(node.elements, context);
+          }else{
+              console.log('Unknown Node Type: ', node.type);
+              // console.dir(node);
+          }
+          break;
+      }
+  };
+  
+  var visit_methods = {
+      'Program': function(node, ctx){
+          var that = this;
+          this.ubigraph.newVertex(function(err, id){
+              var child = {
+                  parent: ctx,
+                  node: node,
+                  vid: id
+              };
+  
+              var parent = child.parent;
+              while(!parent.hasOwnProperty('vid')){
+                  parent = parent.parent;
+              }
+              
+              that.ubigraph.newEdge(parent.vid, child.vid, function(err, id){
+                  that.ubigraph.setEdgeAttribute(id, 'oriented', 'true');
+              });
+              
+              that.visit(node.elements, child);
+          });
+      },
+  
+      'Function': function(node, ctx){
+          var that = this;
+  
+          this.ubigraph.newVertex(function(err, id){
+  
+              var child = {
+                  parent: ctx,
+                  node: node,
+                  vid: id
+              };
+  
+              var parent = child.parent;
+              while(!parent.hasOwnProperty('vid')){
+                  parent = parent.parent;
+              }
+  
+              that.ubigraph.newEdge(parent.vid, child.vid, function(err, id){
+                  that.ubigraph.setEdgeAttribute(id, 'oriented', 'true');
+              });
+  
+              that.visit(node.elements, child);
+          });
+      },
+  
+      'FunctionCall': function(node, ctx){
+          var that = this;
+          this.ubigraph.newVertex(function(err, id){
+              var child = {
+                  parent: ctx,
+                  node: node,
+                  vid: id
+              };
+  
+              that.visit(node.base, child);
+              that.visit(node.arguments, child);
+          });
+      }
+      
+  };
+  
+  module.exports = {
+      getVisitor: function(){
+          return new Skeleton(visit_methods, init, generic_visit);
+      }
+  };
+#+END_SRC
