@@ -623,7 +623,45 @@ process.
 #+END_SRC
 
 ** Call Graph Time!
+To accomplish a Call Graph, I will need a working interpreter. 
+The point of the Call Graph Interpreter is to provide a record of transactions
+that can be replayed. Building upon what I learned from Nathan's University, I
+will need a function akin to `evalScheem`, which takes a parsed expression and 
+a context. 
 
+I will have to handle function names, and assignments of functions to variable
+names. 
+
+*** Requirements
+What I really care about are:
+- Function Names, (including functions attached to (nested) objects).
+- Function Calls.
+- Function Parameters. 
+
+At the first stage, it will be easy to defeat the interpreter, by avoiding 
+one-liners. That's alright for now. 
+
+*** Design
+We'll use the JavaScript visitor and work from there. Interpreting a program, 
+if I recall correctly, should be a preorder traversal of the parse tree. 
+
+Function Definitions are the only things creating context in Javascript, so 
+that should be easy. 
+
+Lending, again, from the free class at nathansuniversity.com, there will be 
+a lookup function that traverses "up" the nested scopes to resolve variable 
+names including function names. 
+
+For simplicity's sake, I'll treat function names as variable names. I don't 
+know if this is how it's done in the real world, but heck, it's my program,
+right?
+
+Well, it turns out I need to return values from each function call here. 
+That might be different from simply preorder traversing the parse tree nodes. 
+
+Pen and Paper are required at this point. 
+
+*** Implementation
 #+BEGIN_SRC javascript :tangle CallGraphVisitor.js
     
   var Skeleton = require('./WalkPEG.js').PegWalker;
@@ -665,8 +703,45 @@ process.
               }
               that.visit_helper(node_s, local_ctx);
           }
-      }; 
+      };
   
+      // Utility Functions, see PL101 for usage
+      this.lookup = function(env, name){
+          if(!env || !env.bindings){
+              throw new Error('lookup failed to find ' + JSON.stringify(name) + ' in nonexistent or empty environment.');
+          }
+  
+          if(!env.hasOwnProperty('bindings')){
+              throw new Error('lookup failed to find ' + JSON.stringify(name) + ' in uninitialized environment.');
+          }
+  
+          if(env.bindings.hasOwnProperty(v)){
+              return env.bindings[name];
+          }else{
+              return this(env.outer, name);
+          }
+      };
+  
+      // not sure i really need this here. 
+      this.add_binding = function(env, name, val){
+          if(env.bindings === undefined){
+              env.bindings = {};
+          }
+  
+          env.bindings[name] = val;
+      };
+  
+      this.update = function(env, name, val){
+          if(!env || !env.bindings){
+              throw new Error('Uninitialized environment!');
+          }
+  
+          if(env.bindings.hasOwnProperty(name)){
+              env.bindings.name = val;
+          }else{
+              this(env.outer, name, val);
+          }
+      }
   };
   
   var generic_visit = function(node, context){
