@@ -174,7 +174,7 @@ the child nodes.
       'AssignmentExpression': function(node){
           // console.log(node.type, node.left, '=', node.right);
 
-'      },
+      },
       'FunctionCall': function(node, context){
           ubigraph.newVertex(function(err, vid){
               label_vertex(vid, '()');
